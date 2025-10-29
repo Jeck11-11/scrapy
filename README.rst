@@ -60,3 +60,31 @@ And follow the documentation_ to learn how to use it.
 If you wish to contribute, see Contributing_.
 
 .. _Contributing: https://docs.scrapy.org/en/master/contributing.html
+
+Running with Docker
+-------------------
+
+You can build a container image that bundles Scrapy together with the
+``extras/link_contact_extractor.py`` helper script:
+
+.. code:: bash
+
+    docker build -t scrapy-toolkit .
+
+Once built, the image exposes the Scrapy command-line interface by default,
+so you can, for example, open an interactive shell against a site:
+
+.. code:: bash
+
+    docker run --rm -it scrapy-toolkit shell https://inisheng.com --nolog
+
+To execute the JSON link/contact extractor from the container, override the
+entry point and pass the target URL:
+
+.. code:: bash
+
+    docker run --rm -it --entrypoint python scrapy-toolkit \
+        extras/link_contact_extractor.py https://inisheng.com
+
+Add ``-s USER_AGENT="..."`` to the Scrapy command if the target site requires
+a custom user agent.
