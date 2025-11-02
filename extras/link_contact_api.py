@@ -25,7 +25,7 @@ import argparse
 import json
 import sys
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -138,27 +138,31 @@ class ScanRequestHandler(BaseHTTPRequestHandler):
             return
 
         start = time.perf_counter()
-        results: List[Dict[str, Any]] = []
+        results: List[Dict[str, Any] | None] = [None] * len(urls)
         failures = 0
 
-        def _scan(target_url: str) -> Dict[str, Any]:
+        def _scan(index: int, target_url: str) -> tuple[int, Dict[str, Any]]:
+            single_start = time.perf_counter()
             try:
                 result = analyse_url(target_url, user_agent=user_agent, timeout=timeout)
-                return {"status": "ok", "result": result}
+                elapsed_ms = round((time.perf_counter() - single_start) * 1000, 2)
+                payload: Dict[str, Any] = {"status": "ok", "elapsed_ms": elapsed_ms}
+                payload.update(result)
+                return index, payload
             except Exception as exc:  # Broad catch to capture network issues.
-                return {"status": "error", "error": str(exc), "input_url": target_url}
+                return index, {
+                    "status": "error",
+                    "error": str(exc),
+                    "input_url": target_url,
+                }
 
         with ThreadPoolExecutor(max_workers=workers) as executor:
-            futures = [executor.submit(_scan, url) for url in urls]
-            for future in futures:
-                outcome = future.result()
+            futures = [executor.submit(_scan, idx, url) for idx, url in enumerate(urls)]
+            for future in as_completed(futures):
+                index, outcome = future.result()
                 if outcome.get("status") == "error":
                     failures += 1
-                    results.append(outcome)
-                else:
-                    payload = {"status": "ok"}
-                    payload.update(outcome["result"])
-                    results.append(payload)
+                results[index] = outcome
 
         elapsed = time.perf_counter() - start
         summary = {
@@ -167,9 +171,21 @@ class ScanRequestHandler(BaseHTTPRequestHandler):
             "failed": failures,
             "duration_ms": round(elapsed * 1000, 2),
             "effective_workers": workers,
+            "requests_per_minute": round((len(urls) / elapsed) * 60, 2)
+            if elapsed > 0
+            else None,
         }
 
-        self._write_json(HTTPStatus.OK, {"summary": summary, "results": results})
+        ordered_results: List[Dict[str, Any]] = [
+            entry
+            if entry is not None
+            else {"status": "error", "error": "scan did not complete"}
+            for entry in results
+        ]
+        self._write_json(
+            HTTPStatus.OK,
+            {"summary": summary, "results": ordered_results},
+        )
 
     # Helper utilities -------------------------------------------------
 

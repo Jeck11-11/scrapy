@@ -89,6 +89,15 @@ entry point and pass the target URL:
 Add ``-s USER_AGENT="..."`` to the Scrapy command if the target site requires
 a custom user agent.
 
+.. note::
+
+   The image ships the Scrapy framework itself and the helper scripts in
+   ``extras/``, but it does not include a sample Scrapy project. Commands such
+   as ``scrapy crawl <spider>`` must be executed from within a Scrapy project
+   directory (one that contains a ``scrapy.cfg`` file), for example by mounting
+   your own project into the container and using ``-w`` to set the working
+   directory.
+
 Expose the scanning API
 ~~~~~~~~~~~~~~~~~~~~~~~
 
