@@ -27,6 +27,7 @@ import sys
 import urllib.parse
 import urllib.request
 from email.message import Message
+from typing import Any, Dict, Iterable, Set, Tuple
 from typing import Iterable, Set, Tuple
 
 from parsel import Selector
@@ -90,11 +91,17 @@ def _split_links(
     return internal, external
 
 
+def fetch_html(
+    url: str, user_agent: str | None = None, timeout: float | None = None
+) -> Tuple[str, str]:
 def fetch_html(url: str, user_agent: str | None = None) -> Tuple[str, str]:
     """Retrieve a web page and return its decoded HTML and Content-Type."""
 
     headers = {"User-Agent": user_agent or "Scrapy link-contact extractor"}
     request = urllib.request.Request(url, headers=headers)
+    with urllib.request.urlopen(  # type: ignore[arg-type]
+        request, timeout=timeout
+    ) as response:
     with urllib.request.urlopen(request) as response:  # type: ignore[arg-type]
         content_type = response.headers.get("Content-Type")
         body = response.read()
@@ -155,6 +162,33 @@ def extract_information(
     return internal_links, external_links, emails, phones
 
 
+def analyse_url(
+    url: str, user_agent: str | None = None, timeout: float | None = None
+) -> Dict[str, Any]:
+    """Fetch and analyse a URL, returning the structured result."""
+
+    parsed_url = urllib.parse.urlparse(url)
+    if parsed_url.scheme not in {"http", "https"}:
+        raise ValueError("The URL must start with http:// or https://")
+
+    html, _ = fetch_html(url, user_agent=user_agent, timeout=timeout)
+    internal, external, emails, phones = extract_information(html, url)
+
+    return {
+        "input_url": url,
+        "counts": {
+            "internal_links": len(internal),
+            "external_links": len(external),
+            "email_addresses": len(emails),
+            "phone_numbers": len(phones),
+        },
+        "internal_links": sorted(internal),
+        "external_links": sorted(external),
+        "email_addresses": sorted(emails),
+        "phone_numbers": sorted(phones),
+    }
+
+
 def parse_arguments(argv: Iterable[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("url", nargs="?", help="URL of the page to analyse")
@@ -162,6 +196,12 @@ def parse_arguments(argv: Iterable[str] | None = None) -> argparse.Namespace:
         "--user-agent",
         dest="user_agent",
         help="User-Agent header to use when fetching the URL.",
+    )
+    parser.add_argument(
+        "--timeout",
+        type=float,
+        default=15.0,
+        help="Timeout (in seconds) for HTTP requests.",
     )
     return parser.parse_args(argv)
 
@@ -178,6 +218,10 @@ def main(argv: Iterable[str] | None = None) -> int:
     if not url:
         raise SystemExit("A URL must be provided to analyse the page.")
 
+    try:
+        result = analyse_url(url, user_agent=args.user_agent, timeout=args.timeout)
+    except ValueError as exc:  # Invalid scheme or malformed URL
+        raise SystemExit(str(exc)) from exc
     parsed_url = urllib.parse.urlparse(url)
     if parsed_url.scheme not in {"http", "https"}:
         raise SystemExit("The URL must start with http:// or https://")
