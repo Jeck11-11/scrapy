@@ -60,3 +60,60 @@ And follow the documentation_ to learn how to use it.
 If you wish to contribute, see Contributing_.
 
 .. _Contributing: https://docs.scrapy.org/en/master/contributing.html
+
+Running with Docker
+-------------------
+
+You can build a container image that bundles Scrapy together with the
+``extras/link_contact_extractor.py`` helper script:
+
+.. code:: bash
+
+    docker build -t scrapy-toolkit .
+
+Once built, the image exposes the Scrapy command-line interface by default,
+so you can, for example, open an interactive shell against a site:
+
+.. code:: bash
+
+    docker run --rm -it scrapy-toolkit shell https://inisheng.com --nolog
+
+To execute the JSON link/contact extractor from the container, override the
+entry point and pass the target URL:
+
+.. code:: bash
+
+    docker run --rm -it --entrypoint python scrapy-toolkit \
+        extras/link_contact_extractor.py https://inisheng.com
+
+Add ``-s USER_AGENT="..."`` to the Scrapy command if the target site requires
+a custom user agent.
+
+Expose the scanning API
+~~~~~~~~~~~~~~~~~~~~~~~
+
+The project also includes an HTTP API that can fan out concurrent requests,
+allowing you to scan large batches of domains (100+ per minute on a typical
+VPS). Launch the service directly on your machine:
+
+.. code:: bash
+
+    python extras/link_contact_api.py --host 0.0.0.0 --port 8000 --max-workers 64
+
+Or run it inside the Docker image and publish the port to your host:
+
+.. code:: bash
+
+    docker run --rm -it -p 8000:8000 --entrypoint python scrapy-toolkit \
+        extras/link_contact_api.py --host 0.0.0.0 --max-workers 64
+
+Send a POST request with a list of URLs to ``/scan`` to trigger the crawl:
+
+.. code:: bash
+
+    curl -X POST http://localhost:8000/scan \
+      -H 'Content-Type: application/json' \
+      -d '{"urls": ["https://example.com", "https://docs.scrapy.org"], "concurrency": 32}'
+
+The response contains a ``summary`` describing how many domains were scanned
+successfully alongside the full per-domain breakdown.
