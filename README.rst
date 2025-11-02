@@ -40,7 +40,7 @@
    :alt: Ask DeepWiki
 
 Scrapy_ is a web scraping framework to extract structured data from websites.
-It is cross-platform, and requires Python 3.9+. It is maintained by Zyte_
+It is cross-platform, and requires Python 3.10+. It is maintained by Zyte_
 (formerly Scrapinghub) and `many other contributors`_.
 
 .. _many other contributors: https://github.com/scrapy/scrapy/graphs/contributors
@@ -88,41 +88,3 @@ entry point and pass the target URL:
 
 Add ``-s USER_AGENT="..."`` to the Scrapy command if the target site requires
 a custom user agent.
-
-.. note::
-
-   The image ships the Scrapy framework itself and the helper scripts in
-   ``extras/``, but it does not include a sample Scrapy project. Commands such
-   as ``scrapy crawl <spider>`` must be executed from within a Scrapy project
-   directory (one that contains a ``scrapy.cfg`` file), for example by mounting
-   your own project into the container and using ``-w`` to set the working
-   directory.
-
-Expose the scanning API
-~~~~~~~~~~~~~~~~~~~~~~~
-
-The project also includes an HTTP API that can fan out concurrent requests,
-allowing you to scan large batches of domains (100+ per minute on a typical
-VPS). Launch the service directly on your machine:
-
-.. code:: bash
-
-    python extras/link_contact_api.py --host 0.0.0.0 --port 8000 --max-workers 64
-
-Or run it inside the Docker image and publish the port to your host:
-
-.. code:: bash
-
-    docker run --rm -it -p 8000:8000 --entrypoint python scrapy-toolkit \
-        extras/link_contact_api.py --host 0.0.0.0 --max-workers 64
-
-Send a POST request with a list of URLs to ``/scan`` to trigger the crawl:
-
-.. code:: bash
-
-    curl -X POST http://localhost:8000/scan \
-      -H 'Content-Type: application/json' \
-      -d '{"urls": ["https://example.com", "https://docs.scrapy.org"], "concurrency": 32}'
-
-The response contains a ``summary`` describing how many domains were scanned
-successfully alongside the full per-domain breakdown.

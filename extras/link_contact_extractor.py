@@ -28,6 +28,7 @@ import urllib.parse
 import urllib.request
 from email.message import Message
 from typing import Any, Dict, Iterable, Set, Tuple
+from typing import Iterable, Set, Tuple
 
 from parsel import Selector
 
@@ -93,6 +94,7 @@ def _split_links(
 def fetch_html(
     url: str, user_agent: str | None = None, timeout: float | None = None
 ) -> Tuple[str, str]:
+def fetch_html(url: str, user_agent: str | None = None) -> Tuple[str, str]:
     """Retrieve a web page and return its decoded HTML and Content-Type."""
 
     headers = {"User-Agent": user_agent or "Scrapy link-contact extractor"}
@@ -100,6 +102,7 @@ def fetch_html(
     with urllib.request.urlopen(  # type: ignore[arg-type]
         request, timeout=timeout
     ) as response:
+    with urllib.request.urlopen(request) as response:  # type: ignore[arg-type]
         content_type = response.headers.get("Content-Type")
         body = response.read()
     html = _decode_response(body, content_type)
@@ -219,6 +222,26 @@ def main(argv: Iterable[str] | None = None) -> int:
         result = analyse_url(url, user_agent=args.user_agent, timeout=args.timeout)
     except ValueError as exc:  # Invalid scheme or malformed URL
         raise SystemExit(str(exc)) from exc
+    parsed_url = urllib.parse.urlparse(url)
+    if parsed_url.scheme not in {"http", "https"}:
+        raise SystemExit("The URL must start with http:// or https://")
+
+    html, _ = fetch_html(url, user_agent=args.user_agent)
+    internal, external, emails, phones = extract_information(html, url)
+
+    result = {
+        "input_url": url,
+        "counts": {
+            "internal_links": len(internal),
+            "external_links": len(external),
+            "email_addresses": len(emails),
+            "phone_numbers": len(phones),
+        },
+        "internal_links": sorted(internal),
+        "external_links": sorted(external),
+        "email_addresses": sorted(emails),
+        "phone_numbers": sorted(phones),
+    }
 
     print(json.dumps(result, indent=2))
 
