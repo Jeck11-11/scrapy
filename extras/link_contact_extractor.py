@@ -20,128 +20,84 @@ package (which Scrapy already depends on).
 
 """Utility script to extract links and contact information from a web page."""
 from __future__ import annotations
-
-import argparse
-import json
-import re
-import sys
-import urllib.parse
-import urllib.request
+import argparse, json, re, sys, urllib.parse, urllib.request
 from email.message import Message
 from typing import Any, Dict, Iterable, Set, Tuple
-
 from parsel import Selector
 
 EMAIL_RE = re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b")
 PHONE_RE = re.compile(r"(?:(?:\+?\d{1,3}[\s.-]?)?(?:\(?\d{2,4}\)?[\s.-]?)?\d{3}[\s.-]?\d{4})")
 
-
-def _clean_phone_number(value: str) -> str:
-    return re.sub(r"[^+\d]", "", value)
-
+def _clean_phone_number(v: str) -> str: return re.sub(r"[^+\d]", "", v)
 
 def _decode_response(data: bytes, content_type: str | None) -> str:
-    encoding = "utf-8"
+    enc = "utf-8"
     if content_type:
-        header = Message()
-        header["content-type"] = content_type
-        encoding = header.get_content_charset() or encoding
-    return data.decode(encoding, errors="replace")
-
+        h = Message(); h["content-type"] = content_type
+        enc = h.get_content_charset() or enc
+    return data.decode(enc, errors="replace")
 
 def _canonicalize_link(href: str, base_url: str) -> str | None:
     href = href.strip()
-    if not href or href.startswith("#"):
-        return None
+    if not href or href.startswith("#"): return None
     absolute = urllib.parse.urljoin(base_url, href)
-    parsed = urllib.parse.urlparse(absolute)
-    if parsed.scheme not in {"http", "https"}:
-        return None
-    parsed = parsed._replace(fragment="")
-    return parsed.geturl()
-
+    p = urllib.parse.urlparse(absolute)
+    if p.scheme not in {"http","https"}: return None
+    p = p._replace(fragment="")
+    return p.geturl()
 
 def _split_links(links: Iterable[str], base_host: str) -> Tuple[Set[str], Set[str]]:
-    internal: Set[str] = set()
-    external: Set[str] = set()
+    internal, external = set(), set()
     for link in links:
-        parsed = urllib.parse.urlparse(link)
-        if parsed.netloc.lower() == base_host:
-            internal.add(link)
-        else:
-            external.add(link)
+        p = urllib.parse.urlparse(link)
+        (internal if p.netloc.lower()==base_host else external).add(link)
     return internal, external
 
-
 def fetch_html(url: str, user_agent: str | None = None, timeout: float | None = None) -> Tuple[str, str]:
-    """Retrieve a web page and return its decoded HTML and Content-Type."""
     headers = {"User-Agent": user_agent or "Scrapy link-contact extractor"}
-    request = urllib.request.Request(url, headers=headers)
-    with urllib.request.urlopen(request, timeout=timeout) as response:  # type: ignore[arg-type]
-        content_type = response.headers.get("Content-Type")
-        body = response.read()
-    html = _decode_response(body, content_type)
-    return html, (content_type or "")
-
+    req = urllib.request.Request(url, headers=headers)
+    with urllib.request.urlopen(req, timeout=timeout) as resp:  # type: ignore[arg-type]
+        ct = resp.headers.get("Content-Type")
+        body = resp.read()
+    html = _decode_response(body, ct)
+    return html, (ct or "")
 
 def extract_information(html: str, base_url: str) -> Tuple[Set[str], Set[str], Set[str], Set[str]]:
-    """Extract internal/external links, emails, and phone numbers."""
-    selector = Selector(text=html, base_url=base_url)
-    raw_hrefs = selector.css("a::attr(href)").getall()
+    sel = Selector(text=html, base_url=base_url)
+    raw_hrefs = sel.css("a::attr(href)").getall()
+    internal, external, emails, phones = set(), set(), set(), set()
+    base_host = urllib.parse.urlparse(base_url).netloc.lower()
 
-    internal_links: Set[str] = set()
-    external_links: Set[str] = set()
-    emails: Set[str] = set()
-    phones: Set[str] = set()
-
-    parsed_base = urllib.parse.urlparse(base_url)
-    base_host = parsed_base.netloc.lower()
-
-    normalised_links: list[str] = []
-    for raw_href in raw_hrefs:
-        if not raw_href:
-            continue
-        href = raw_href.strip()
+    norm_links: list[str] = []
+    for raw in raw_hrefs:
+        if not raw: continue
+        href = raw.strip()
         if href.lower().startswith("mailto:"):
-            address = href.split(":", 1)[1].split("?", 1)[0]
-            if address:
-                emails.add(address)
-            continue
+            addr = href.split(":",1)[1].split("?",1)[0]
+            if addr: emails.add(addr); continue
         if href.lower().startswith("tel:"):
-            number = href.split(":", 1)[1]
-            cleaned = _clean_phone_number(number)
-            if cleaned:
-                phones.add(cleaned)
-            continue
+            num = href.split(":",1)[1]
+            cl = _clean_phone_number(num)
+            if cl: phones.add(cl); continue
+        n = _canonicalize_link(href, base_url)
+        if n: norm_links.append(n)
 
-        normalised = _canonicalize_link(href, base_url)
-        if normalised:
-            normalised_links.append(normalised)
+    add_int, add_ext = _split_links(norm_links, base_host)
+    internal.update(add_int); external.update(add_ext)
 
-    additional_internal, additional_external = _split_links(normalised_links, base_host)
-    internal_links.update(additional_internal)
-    external_links.update(additional_external)
+    text = sel.xpath("string()").get() or ""
+    for m in EMAIL_RE.findall(text): emails.add(m)
+    for m in PHONE_RE.findall(text):
+        cl = _clean_phone_number(m)
+        if len(cl) >= 7: phones.add(cl)
 
-    text_content = selector.xpath("string()").get() or ""
-    for match in EMAIL_RE.findall(text_content):
-        emails.add(match)
-    for match in PHONE_RE.findall(text_content):
-        cleaned = _clean_phone_number(match)
-        if len(cleaned) >= 7:
-            phones.add(cleaned)
-
-    return internal_links, external_links, emails, phones
-
+    return internal, external, emails, phones
 
 def analyse_url(url: str, user_agent: str | None = None, timeout: float | None = None) -> Dict[str, Any]:
-    """Fetch and analyse a URL, returning the structured result."""
-    parsed_url = urllib.parse.urlparse(url)
-    if parsed_url.scheme not in {"http", "https"}:
-        raise ValueError("The URL must start with http:// or https://")
-
+    p = urllib.parse.urlparse(url)
+    if p.scheme not in {"http","https"}: raise ValueError("The URL must start with http:// or https://")
     html, _ = fetch_html(url, user_agent=user_agent, timeout=timeout)
     internal, external, emails, phones = extract_information(html, url)
-
     return {
         "input_url": url,
         "counts": {
@@ -156,32 +112,24 @@ def analyse_url(url: str, user_agent: str | None = None, timeout: float | None =
         "phone_numbers": sorted(phones),
     }
 
-
 def parse_arguments(argv: Iterable[str] | None = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("url", nargs="?", help="URL of the page to analyse")
-    parser.add_argument("--user-agent", dest="user_agent", help="User-Agent header to use when fetching the URL.")
-    parser.add_argument("--timeout", type=float, default=15.0, help="Timeout (in seconds) for HTTP requests.")
-    return parser.parse_args(argv)
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("url", nargs="?", help="URL of the page to analyse")
+    ap.add_argument("--user-agent", dest="user_agent", help="User-Agent header to use when fetching the URL.")
+    ap.add_argument("--timeout", type=float, default=15.0, help="Timeout (in seconds) for HTTP requests.")
+    return ap.parse_args(argv)
 
-
-def get_user_input(prompt: str = "Enter the URL to analyse: ") -> str:
-    return input(prompt).strip()
-
+def get_user_input(prompt: str = "Enter the URL to analyse: ") -> str: return input(prompt).strip()
 
 def main(argv: Iterable[str] | None = None) -> int:
     args = parse_arguments(argv)
     url = args.url or get_user_input()
-    if not url:
-        raise SystemExit("A URL must be provided to analyse the page.")
+    if not url: raise SystemExit("A URL must be provided to analyse the page.")
     try:
         result = analyse_url(url, user_agent=args.user_agent, timeout=args.timeout)
     except ValueError as exc:
         raise SystemExit(str(exc)) from exc
-
-    print(json.dumps(result, indent=2))
-    return 0
-
+    print(json.dumps(result, indent=2)); return 0
 
 if __name__ == "__main__":
     sys.exit(main())
