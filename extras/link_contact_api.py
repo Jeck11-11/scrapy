@@ -36,7 +36,7 @@ if __package__ is None or __package__ == "":
     # Allow importing the extractor when executed as a script.
     sys.path.append(str(Path(__file__).resolve().parent))
 
-from link_contact_extractor import analyse_url  # type: ignore  # noqa: E402
+from .link_contact_extractor import analyse_url  # type: ignore  # noqa: E402
 
 
 class ScanHTTPServer(ThreadingHTTPServer):
