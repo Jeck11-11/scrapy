@@ -18,8 +18,6 @@ The script only depends on the Python standard library and the ``parsel``
 package (which Scrapy already depends on).
 """
 
-"""Utility script to extract links and contact information from a web page."""
-from __future__ import annotations
 import argparse, json, re, sys, urllib.parse, urllib.request
 from email.message import Message
 from typing import Any, Dict, Iterable, Set, Tuple
