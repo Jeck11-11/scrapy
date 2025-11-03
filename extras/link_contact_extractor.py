@@ -27,7 +27,8 @@ import sys
 import urllib.parse
 import urllib.request
 from email.message import Message
-from typing import Any, Iterable
+from typing import Any, Dict, Iterable, Set, Tuple
+from typing import Iterable, Set, Tuple
 
 from parsel import Selector
 
@@ -73,11 +74,13 @@ def _canonicalize_link(href: str, base_url: str) -> str | None:
     return parsed.geturl()
 
 
-def _split_links(links: Iterable[str], base_host: str) -> tuple[set[str], set[str]]:
+def _split_links(
+    links: Iterable[str], base_host: str
+) -> Tuple[Set[str], Set[str]]:
     """Partition links into internal (same host) and external sets."""
 
-    internal: set[str] = set()
-    external: set[str] = set()
+    internal: Set[str] = set()
+    external: Set[str] = set()
 
     for link in links:
         parsed = urllib.parse.urlparse(link)
@@ -90,7 +93,8 @@ def _split_links(links: Iterable[str], base_host: str) -> tuple[set[str], set[st
 
 def fetch_html(
     url: str, user_agent: str | None = None, timeout: float | None = None
-) -> tuple[str, str]:
+) -> Tuple[str, str]:
+def fetch_html(url: str, user_agent: str | None = None) -> Tuple[str, str]:
     """Retrieve a web page and return its decoded HTML and Content-Type."""
 
     headers = {"User-Agent": user_agent or "Scrapy link-contact extractor"}
@@ -98,6 +102,7 @@ def fetch_html(
     with urllib.request.urlopen(  # type: ignore[arg-type]
         request, timeout=timeout
     ) as response:
+    with urllib.request.urlopen(request) as response:  # type: ignore[arg-type]
         content_type = response.headers.get("Content-Type")
         body = response.read()
     html = _decode_response(body, content_type)
@@ -106,16 +111,16 @@ def fetch_html(
 
 def extract_information(
     html: str, base_url: str
-) -> tuple[set[str], set[str], set[str], set[str]]:
+) -> Tuple[Set[str], Set[str], Set[str], Set[str]]:
     """Extract internal/external links, emails, and phone numbers."""
 
     selector = Selector(text=html, base_url=base_url)
     raw_hrefs = selector.css("a::attr(href)").getall()
 
-    internal_links: set[str] = set()
-    external_links: set[str] = set()
-    emails: set[str] = set()
-    phones: set[str] = set()
+    internal_links: Set[str] = set()
+    external_links: Set[str] = set()
+    emails: Set[str] = set()
+    phones: Set[str] = set()
 
     parsed_base = urllib.parse.urlparse(base_url)
     base_host = parsed_base.netloc.lower()
@@ -159,7 +164,7 @@ def extract_information(
 
 def analyse_url(
     url: str, user_agent: str | None = None, timeout: float | None = None
-) -> dict[str, Any]:
+) -> Dict[str, Any]:
     """Fetch and analyse a URL, returning the structured result."""
 
     parsed_url = urllib.parse.urlparse(url)
@@ -217,6 +222,26 @@ def main(argv: Iterable[str] | None = None) -> int:
         result = analyse_url(url, user_agent=args.user_agent, timeout=args.timeout)
     except ValueError as exc:  # Invalid scheme or malformed URL
         raise SystemExit(str(exc)) from exc
+    parsed_url = urllib.parse.urlparse(url)
+    if parsed_url.scheme not in {"http", "https"}:
+        raise SystemExit("The URL must start with http:// or https://")
+
+    html, _ = fetch_html(url, user_agent=args.user_agent)
+    internal, external, emails, phones = extract_information(html, url)
+
+    result = {
+        "input_url": url,
+        "counts": {
+            "internal_links": len(internal),
+            "external_links": len(external),
+            "email_addresses": len(emails),
+            "phone_numbers": len(phones),
+        },
+        "internal_links": sorted(internal),
+        "external_links": sorted(external),
+        "email_addresses": sorted(emails),
+        "phone_numbers": sorted(phones),
+    }
 
     print(json.dumps(result, indent=2))
 
