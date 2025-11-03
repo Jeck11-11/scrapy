@@ -1,241 +1,165 @@
-"""ASGI application that exposes the link/contact extractor over HTTP.
+"""Simple HTTP API for scanning multiple domains for links and contacts.
 
-The app provides a ``POST /scan`` endpoint that accepts a JSON payload with a
-``urls`` list and optional ``concurrency``, ``timeout``, and ``user_agent``
-fields. Each URL is analysed using :func:`extras.link_contact_extractor.analyse_url`
-and the results are returned alongside aggregated statistics.
+The server exposes a single ``POST /scan`` endpoint that accepts a JSON body
+containing a list of URLs to inspect. Results are returned as JSON and reuse
+the logic from :mod:`extras.link_contact_extractor`.
 
-Run the service with ``uvicorn``::
+Example request::
 
-    uvicorn extras.link_contact_api:app --host 0.0.0.0 --port 8000
+    curl -X POST http://127.0.0.1:8000/scan \
+      -H "Content-Type: application/json" \
+      -d '{"urls": ["https://example.com", "https://www.python.org"]}'
 
-The module also exposes a small CLI wrapper that launches Uvicorn directly so
-that ``python -m extras.link_contact_api`` remains convenient during
-development.
+Command-line usage::
+
+    python extras/link_contact_api.py --host 0.0.0.0 --port 8000 \
+        --max-workers 32 --timeout 15
+
+The server is designed to handle batches of 100+ domains per minute by
+executing requests concurrently using a thread pool.
 """
 
 from __future__ import annotations
 
 import argparse
-import asyncio
 import json
-import os
 import sys
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from http import HTTPStatus
-from typing import Any, Dict, Iterable, List, Tuple
-
-from .link_contact_extractor import analyse_url
-
-DEFAULT_MAX_WORKERS = int(os.environ.get("LINK_CONTACT_MAX_WORKERS", "32"))
-DEFAULT_TIMEOUT = float(os.environ.get("LINK_CONTACT_REQUEST_TIMEOUT", "15.0"))
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from typing import Any, Dict, Iterable, List
 
 
-def _json_response(
-    status: HTTPStatus, payload: Dict[str, Any]
-) -> Tuple[int, List[Tuple[bytes, bytes]], bytes]:
-    body = json.dumps(payload).encode("utf-8")
-    headers = [
-        (b"content-type", b"application/json"),
-        (b"content-length", str(len(body)).encode("ascii")),
-    ]
-    return status.value, headers, body
+if __package__ is None or __package__ == "":
+    # Allow importing the extractor when executed as a script.
+    sys.path.append(str(Path(__file__).resolve().parent))
+
+from link_contact_extractor import analyse_url  # type: ignore  # noqa: E402
 
 
-def _resolve_worker_count(requested: Any, batch_size: int, max_workers: int) -> int:
-    workers = max(1, max_workers)
-    if requested is not None:
-        if not isinstance(requested, int) or requested <= 0:
-            raise ValueError("'concurrency' must be a positive integer when provided.")
-        workers = min(requested, max_workers)
-    workers = min(workers, batch_size) or 1
-    return workers
-
-
-async def _receive_body(receive: Any) -> bytes:
-    body = b""
-    while True:
-        message = await receive()
-        chunk = message.get("body", b"")
-        if chunk:
-            body += chunk
-        if not message.get("more_body", False):
-            break
-    return body
-
-
-def _scan_single(
-    index: int,
-    target_url: str,
-    *,
-    user_agent: str | None,
-    timeout: float,
-) -> Tuple[int, Dict[str, Any]]:
-    single_start = time.perf_counter()
-    try:
-        result = analyse_url(target_url, user_agent=user_agent, timeout=timeout)
-        elapsed_ms = round((time.perf_counter() - single_start) * 1000, 2)
-        payload: Dict[str, Any] = {"status": "ok", "elapsed_ms": elapsed_ms}
-        payload.update(result)
-        return index, payload
-    except Exception as exc:  # pragma: no cover - defensive catch for network errors
-        return index, {"status": "error", "error": str(exc), "input_url": target_url}
-
-
-class ScanAPI:
-    """Minimal ASGI application that exposes the scanning endpoint."""
+class ScanHTTPServer(ThreadingHTTPServer):
+    """Threaded HTTP server that keeps track of concurrency limits."""
 
     def __init__(
         self,
+        server_address: tuple[str, int],
+        handler_class: type[BaseHTTPRequestHandler],
         *,
-        max_workers: int = DEFAULT_MAX_WORKERS,
-        request_timeout: float = DEFAULT_TIMEOUT,
+        max_workers: int,
+        request_timeout: float,
     ) -> None:
-        if max_workers <= 0:
-            raise ValueError("max_workers must be a positive integer")
-        if request_timeout <= 0:
-            raise ValueError("request_timeout must be positive")
+        super().__init__(server_address, handler_class)
         self.max_workers = max_workers
         self.request_timeout = request_timeout
 
-    async def __call__(self, scope: Dict[str, Any], receive: Any, send: Any) -> None:
-        if scope["type"] != "http":
-            raise RuntimeError("ScanAPI only handles HTTP connections")
 
-        method = scope.get("method", "GET").upper()
-        path = scope.get("path", "/")
+class ScanRequestHandler(BaseHTTPRequestHandler):
+    server_version = "LinkContactScan/1.0"
+    protocol_version = "HTTP/1.1"
 
-        if method == "GET" and path.rstrip("/") == "":
-            status, headers, body = _json_response(
-                HTTPStatus.OK,
-                {"status": "ok", "message": "Use POST /scan with a JSON body."},
-            )
-            await send(
-                {"type": "http.response.start", "status": status, "headers": headers}
-            )
-            await send({"type": "http.response.body", "body": body})
+    def do_GET(self) -> None:  # noqa: N802 - required name by BaseHTTPRequestHandler
+        if self.path.rstrip("/") == "":
+            payload = {
+                "status": "ok",
+                "message": "Use POST /scan with a JSON body to initiate scans.",
+            }
+            self._write_json(HTTPStatus.OK, payload)
             return
 
-        if method == "GET" and path == "/healthz":
-            status, headers, body = _json_response(HTTPStatus.OK, {"status": "healthy"})
-            await send(
-                {"type": "http.response.start", "status": status, "headers": headers}
-            )
-            await send({"type": "http.response.body", "body": body})
+        if self.path == "/healthz":
+            self._write_json(HTTPStatus.OK, {"status": "healthy"})
             return
 
-        if method != "POST" or path != "/scan":
-            status, headers, body = _json_response(
-                HTTPStatus.NOT_FOUND, {"error": "Not Found"}
-            )
-            await send(
-                {"type": "http.response.start", "status": status, "headers": headers}
-            )
-            await send({"type": "http.response.body", "body": body})
-            return
+        self._write_json(HTTPStatus.NOT_FOUND, {"error": "Not Found"})
 
-        body = await _receive_body(receive)
-        if not body:
-            status, headers, body_bytes = _json_response(
-                HTTPStatus.BAD_REQUEST,
-                {"error": "Request body must contain JSON data."},
-            )
-            await send(
-                {"type": "http.response.start", "status": status, "headers": headers}
-            )
-            await send({"type": "http.response.body", "body": body_bytes})
+    def do_POST(self) -> None:  # noqa: N802
+        if self.path != "/scan":
+            self._write_json(HTTPStatus.NOT_FOUND, {"error": "Not Found"})
             return
 
         try:
+            content_length = int(self.headers.get("Content-Length", "0"))
+        except ValueError:
+            self._write_json(
+                HTTPStatus.BAD_REQUEST, {"error": "Invalid Content-Length header"}
+            )
+            return
+
+        if content_length <= 0:
+            self._write_json(
+                HTTPStatus.BAD_REQUEST,
+                {"error": "Request body must contain JSON data."},
+            )
+            return
+
+        body = self.rfile.read(content_length)
+        try:
             payload = json.loads(body.decode("utf-8"))
         except json.JSONDecodeError as exc:
-            status, headers, body_bytes = _json_response(
+            self._write_json(
                 HTTPStatus.BAD_REQUEST,
                 {"error": f"Invalid JSON payload: {exc.msg}"},
             )
-            await send(
-                {"type": "http.response.start", "status": status, "headers": headers}
-            )
-            await send({"type": "http.response.body", "body": body_bytes})
             return
 
         urls = payload.get("urls")
         if not isinstance(urls, list) or not urls:
-            status, headers, body_bytes = _json_response(
+            self._write_json(
                 HTTPStatus.BAD_REQUEST,
                 {"error": "Payload must include a non-empty 'urls' list."},
             )
-            await send(
-                {"type": "http.response.start", "status": status, "headers": headers}
-            )
-            await send({"type": "http.response.body", "body": body_bytes})
             return
 
         user_agent = payload.get("user_agent")
         if user_agent is not None and not isinstance(user_agent, str):
-            status, headers, body_bytes = _json_response(
+            self._write_json(
                 HTTPStatus.BAD_REQUEST,
                 {"error": "'user_agent' must be a string when provided."},
             )
-            await send(
-                {"type": "http.response.start", "status": status, "headers": headers}
-            )
-            await send({"type": "http.response.body", "body": body_bytes})
             return
 
-        timeout = self.request_timeout
+        timeout = self.server.request_timeout
         if "timeout" in payload:
             timeout_value = payload["timeout"]
             if not isinstance(timeout_value, (int, float)) or timeout_value <= 0:
-                status, headers, body_bytes = _json_response(
+                self._write_json(
                     HTTPStatus.BAD_REQUEST,
                     {"error": "'timeout' must be a positive number when provided."},
                 )
-                await send(
-                    {
-                        "type": "http.response.start",
-                        "status": status,
-                        "headers": headers,
-                    }
-                )
-                await send({"type": "http.response.body", "body": body_bytes})
                 return
             timeout = float(timeout_value)
 
         try:
-            workers = _resolve_worker_count(
-                payload.get("concurrency"), len(urls), self.max_workers
-            )
+            workers = self._resolve_worker_count(payload.get("concurrency"), len(urls))
         except ValueError as exc:
-            status, headers, body_bytes = _json_response(
-                HTTPStatus.BAD_REQUEST, {"error": str(exc)}
-            )
-            await send(
-                {"type": "http.response.start", "status": status, "headers": headers}
-            )
-            await send({"type": "http.response.body", "body": body_bytes})
+            self._write_json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
             return
 
         start = time.perf_counter()
         results: List[Dict[str, Any] | None] = [None] * len(urls)
         failures = 0
 
+        def _scan(index: int, target_url: str) -> tuple[int, Dict[str, Any]]:
+            single_start = time.perf_counter()
+            try:
+                result = analyse_url(target_url, user_agent=user_agent, timeout=timeout)
+                elapsed_ms = round((time.perf_counter() - single_start) * 1000, 2)
+                payload: Dict[str, Any] = {"status": "ok", "elapsed_ms": elapsed_ms}
+                payload.update(result)
+                return index, payload
+            except Exception as exc:  # Broad catch to capture network issues.
+                return index, {
+                    "status": "error",
+                    "error": str(exc),
+                    "input_url": target_url,
+                }
+
         with ThreadPoolExecutor(max_workers=workers) as executor:
-            futures = [
-                asyncio.wrap_future(
-                    executor.submit(
-                        _scan_single,
-                        idx,
-                        url,
-                        user_agent=user_agent,
-                        timeout=timeout,
-                    )
-                )
-                for idx, url in enumerate(urls)
-            ]
-            for future in asyncio.as_completed(futures):
-                index, outcome = await future
+            futures = [executor.submit(_scan, idx, url) for idx, url in enumerate(urls)]
+            for future in as_completed(futures):
+                index, outcome = future.result()
                 if outcome.get("status") == "error":
                     failures += 1
                 results[index] = outcome
@@ -247,49 +171,65 @@ class ScanAPI:
             "failed": failures,
             "duration_ms": round(elapsed * 1000, 2),
             "effective_workers": workers,
-            "requests_per_minute": (
-                round((len(urls) / elapsed) * 60, 2) if elapsed > 0 else None
-            ),
+            "requests_per_minute": round((len(urls) / elapsed) * 60, 2)
+            if elapsed > 0
+            else None,
         }
 
         ordered_results: List[Dict[str, Any]] = [
-            (
-                entry
-                if entry is not None
-                else {"status": "error", "error": "scan did not complete"}
-            )
+            entry
+            if entry is not None
+            else {"status": "error", "error": "scan did not complete"}
             for entry in results
         ]
-
-        status_code, headers, body_bytes = _json_response(
+        self._write_json(
             HTTPStatus.OK,
             {"summary": summary, "results": ordered_results},
         )
-        await send(
-            {"type": "http.response.start", "status": status_code, "headers": headers}
+
+    # Helper utilities -------------------------------------------------
+
+    def log_message(self, format: str, *args: Any) -> None:  # noqa: A003
+        """Reduce log noise by prefixing with the client address."""
+
+        sys.stderr.write(
+            "%s - - [%s] %s\n"
+            % (self.address_string(), self.log_date_time_string(), format % args)
         )
-        await send({"type": "http.response.body", "body": body_bytes})
 
+    def _resolve_worker_count(self, requested: Any, batch_size: int) -> int:
+        max_workers = max(1, getattr(self.server, "max_workers", 1))
+        workers = max_workers
+        if requested is not None:
+            if not isinstance(requested, int) or requested <= 0:
+                raise ValueError("'concurrency' must be a positive integer when provided.")
+            workers = min(requested, max_workers)
+        workers = min(workers, batch_size) or 1
+        return workers
 
-app = ScanAPI()
+    def _write_json(self, status: HTTPStatus, payload: Dict[str, Any]) -> None:
+        body = json.dumps(payload).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
 
 
 def parse_arguments(argv: Iterable[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
-        "--host", default="127.0.0.1", help="Host/IP to bind the server to"
-    )
+    parser.add_argument("--host", default="127.0.0.1", help="Host/IP to bind the server to")
     parser.add_argument("--port", type=int, default=8000, help="Port to listen on")
     parser.add_argument(
         "--max-workers",
         type=int,
-        default=DEFAULT_MAX_WORKERS,
+        default=32,
         help="Maximum number of concurrent scans per request.",
     )
     parser.add_argument(
         "--timeout",
         type=float,
-        default=DEFAULT_TIMEOUT,
+        default=15.0,
         help="Default timeout (in seconds) for outbound HTTP requests.",
     )
     return parser.parse_args(argv)
@@ -299,16 +239,20 @@ def main(argv: Iterable[str] | None = None) -> int:
     args = parse_arguments(argv)
     if args.max_workers <= 0:
         raise SystemExit("--max-workers must be a positive integer")
-    if args.timeout <= 0:
-        raise SystemExit("--timeout must be positive")
 
+    server = ScanHTTPServer(
+        (args.host, args.port),
+        ScanRequestHandler,
+        max_workers=args.max_workers,
+        request_timeout=args.timeout,
+    )
     try:
-        import uvicorn
-    except ImportError as exc:  # pragma: no cover - optional dependency
-        raise SystemExit("uvicorn is required to run the API server") from exc
-
-    configured_app = ScanAPI(max_workers=args.max_workers, request_timeout=args.timeout)
-    uvicorn.run(configured_app, host=args.host, port=args.port)
+        print(f"Serving link/contact scans on http://{args.host}:{args.port}")
+        server.serve_forever()
+    except KeyboardInterrupt:
+        print("\nShutting down server...")
+    finally:
+        server.server_close()
     return 0
 
 
