@@ -1,12 +1,13 @@
 #!/usr/bin/env python
 """Run offline self-tests for the link/contact extractor helpers."""
+from __future__ import annotations
 
 import argparse
 import json
 from pathlib import Path
 from typing import Any, Dict
 
-from .link_contact_extractor import extract_information
+from link_contact_extractor import extract_information
 
 
 FIXTURE_BASE_URL = "https://example.com/self-test"
