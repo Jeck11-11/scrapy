@@ -1,0 +1,40 @@
+# Version control
+.git
+
+# Python artifacts
+__pycache__
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.env
+.venv
+
+# Build outputs
+build
+.dist
+site
+htmlcov
+coverage.xml
+pip-wheel-metadata
+
+# Packaging metadata
+.eggs
+*.egg-info
+
+# Tooling caches
+.tox
+pytest_cache
+.mypy_cache
+
+# Documentation build artifacts
+docs/_build
+
+# Node.js dependencies
+node_modules
+
+# Test-only directories
+tests
+sep
+tests_typing
+
