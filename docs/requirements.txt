@@ -8,3 +8,4 @@ parsel
 phonenumbers
 fastapi
 uvicorn[standard]
+REQ
