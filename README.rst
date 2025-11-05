@@ -88,3 +88,59 @@ entry point and pass the target URL:
 
 Add ``-s USER_AGENT="..."`` to the Scrapy command if the target site requires
 a custom user agent.
+
+.. note::
+
+   The image ships the Scrapy framework itself and the helper scripts in
+   ``extras/``, but it does not include a sample Scrapy project. Commands such
+   as ``scrapy crawl <spider>`` must be executed from within a Scrapy project
+   directory (one that contains a ``scrapy.cfg`` file), for example by mounting
+   your own project into the container and using ``-w`` to set the working
+   directory.
+
+Expose the scanning API
+~~~~~~~~~~~~~~~~~~~~~~~
+
+The project also includes an HTTP API that can fan out concurrent requests,
+allowing you to scan large batches of domains (100+ per minute on a typical
+VPS). Launch the service directly on your machine with ``uvicorn``:
+
+.. code:: bash
+
+    uvicorn extras.link_contact_api:app --host 0.0.0.0 --port 8000
+
+Or run it inside the Docker image and publish the port to your host:
+
+.. code:: bash
+
+    docker run --rm -it -p 8000:8000 scrapy-toolkit \
+        uvicorn extras.link_contact_api:app --host 0.0.0.0 --port 8000
+
+Send a POST request with a list of URLs to ``/scan`` to trigger the crawl:
+
+.. code:: bash
+
+    curl -X POST http://localhost:8000/scan \
+      -H 'Content-Type: application/json' \
+      -d '{"urls": ["https://example.com", "https://docs.scrapy.org"], "concurrency": 32}'
+
+The response contains a ``summary`` describing how many domains were scanned
+successfully alongside the full per-domain breakdown.
+
+Offline self-test
+~~~~~~~~~~~~~~~~~
+
+If you are working in an environment without outbound network access you can
+still verify that the helper utilities behave as expected. The repository
+includes a small HTML fixture and a self-test script that exercises the link
+and contact extraction logic without making any HTTP requests:
+
+.. code:: bash
+
+   python extras/link_contact_selftest.py --pretty
+
+The script prints the expected and observed results in JSON format and exits
+with a non-zero status if a regression is detected. You can also supply your
+own HTML fixture::
+
+   python extras/link_contact_selftest.py path/to/page.html
